@@ -7,21 +7,29 @@
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <pthread.h>
 #include <sys/sendfile.h>
+
+struct FdInfo 
+{
+	int fd;
+	int epfd;
+	pthread_t pid;
+};
 
 int compare(const struct dirent** a, const struct dirent** b) {
 	return strcoll((*a)->d_name, (*b)->d_name);
 }
 
 int init_listenSocket(unsigned short port) {
-	//´´½¨
+	//åˆ›å»º
 	int lfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (lfd < 0) {
 		printf("create socket failed...");
 		return -1;
 	}
 
-	//ÉèÖÃ¶Ë¿Ú¸´ÓÃ
+	//è®¾ç½®ç«¯å£å¤ç”¨
 	int opt = 1;
 	int ret = 0;
 	if ((ret = setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) < 0) {
@@ -30,15 +38,15 @@ int init_listenSocket(unsigned short port) {
 	}
 
 	struct sockaddr_in servaddr;
-	servaddr.sin_family = AF_INET;//µØÖ·Ð­Òé,Ö¸Ã÷Ê¹ÓÃ ipv4 »òÕß ipv6
+	servaddr.sin_family = AF_INET;//åœ°å€åè®®,æŒ‡æ˜Žä½¿ç”¨ ipv4 æˆ–è€… ipv6
 	servaddr.sin_port = htons(port);
 	servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-	//°ó¶¨
+	//ç»‘å®š
 	int res = bind(lfd, (struct sockaddr*)&servaddr, sizeof(servaddr));
 	if (res == -1)
 		perror("bind_error\n");
 
-	//¼àÌý
+	//ç›‘å¬
 	if (listen(lfd, 128) < 0) {
 		printf("listen_error\n");
 		return -1;
@@ -57,45 +65,54 @@ int epollRun(int lfd) {
 	ev.events = EPOLLIN;
 	ev.data.fd = lfd;
 
-	//Ìí¼Óµ½epollÊ÷ÉÏ
+	//æ·»åŠ åˆ°epollæ ‘ä¸Š
 	epoll_ctl(epfd, EPOLL_CTL_ADD, lfd, &ev);
 
 	struct epoll_event evs[1024];
 	int size = sizeof(evs) / sizeof(evs[0]);
 	while (1) {
-		//»ñÈ¡µ½¶ÁÐ´ÊÂ¼þ
+		//èŽ·å–åˆ°è¯»å†™äº‹ä»¶
 		int num = epoll_wait(epfd, evs, size, -1);
 		for (int i = 0; i < num; i++) {
 			int fd = evs[i].data.fd;
-
-			if (fd == lfd) {//Èç¹ûÊÇ¼àÌý£¬Ôòaccept ²¢¼ÓÈëµ½epollÖÐ
-				int cfd = accept(fd, NULL, NULL);
-				
-				// ET ´¥·¢
-				ev.events = EPOLLIN | EPOLLET;
-				ev.data.fd = cfd;
-				
-				//ÉèÖÃ·Ç×èÈû
-				int flag = fcntl(cfd, F_GETFL);
-				flag |= O_NONBLOCK;
-				fcntl(cfd, F_SETFL, flag);
-
-				epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
-
+			struct FdInfo* info = (struct FdInfo*)malloc(sizeof(struct FdInfo));
+			info->epfd = epfd;
+			info->fd = fd;
+			if (fd == lfd) {//å¦‚æžœæ˜¯ç›‘å¬ï¼Œåˆ™accept å¹¶åŠ å…¥åˆ°epollä¸­
+				pthread_create(&info->pid, NULL, acceptRequest, info);
 			}
-			else {//Í¨ÐÅ
-				recvHttpRequest(fd, epfd);
+			else {//é€šä¿¡
+				pthread_create(&info->pid, NULL, recvHttpRequest, info);
 			}
 		}
 	}
 }
 
-int recvHttpRequest(int cfd, int epfd) {
+void* acceptRequest(void* arg) {
+	struct FdInfo* info = (struct FdInfo*)arg;
+
+	int cfd = accept(info->fd, NULL, NULL);
+
+	// ET è§¦å‘
+	struct epoll_event ev;
+	ev.events = EPOLLIN | EPOLLET;
+	ev.data.fd = cfd;
+
+	//è®¾ç½®éžé˜»å¡ž
+	int flag = fcntl(cfd, F_GETFL);
+	flag |= O_NONBLOCK;
+	fcntl(cfd, F_SETFL, flag);
+	epoll_ctl(info->epfd, EPOLL_CTL_ADD, cfd, &ev);
+	free(info);
+}
+
+void* recvHttpRequest(void* arg) {
+	struct FdInfo* info = (struct FdInfo*)arg;
 	printf("Begin receive data...\n");
 	char tmp[1024];
 	int len = 0, total = 0;
 	char buf[4096];
-	while ((len = recv(cfd, tmp, sizeof(tmp), 0)) > 0) {
+	while ((len = recv(info->fd, tmp, sizeof(tmp), 0)) > 0) {
 		if (total + len < sizeof buf) {
 			memcpy(buf + total, tmp, len);
 		}
@@ -103,22 +120,56 @@ int recvHttpRequest(int cfd, int epfd) {
 	}
 
 	if (len == -1 && errno == EAGAIN) {
-		//½âÎöÇëÇóÐÐ
+		//è§£æžè¯·æ±‚è¡Œ
 		char* pt = strstr(buf, "\r\n");
 		pt[0] = '\0';
-		parseRequestLine(buf, cfd);
+		parseRequestLine(buf, info->fd);
 	}
 	else if (len == 0) {
-		epoll_ctl(epfd, EPOLL_CTL_DEL, cfd, NULL);
-		close(cfd);
+		epoll_ctl(info->epfd, EPOLL_CTL_DEL, info->fd, NULL);
+		close(info->fd);
+	}
+	free(info);
+	return 0;
+}
+
+int hexToDec(char ch) {
+	if (ch >= '0' && ch <= '9') {
+		return ch - '0';
+	}
+	if (ch >= 'a' && ch <= 'f') {
+		return ch - 'a' + 10;
+	}
+	if (ch >= 'A' && ch <= 'F') {
+		return ch - 'A' + 10;
 	}
 	return 0;
 }
+
+void decodeMsg(char* to, char* from) {
+	for (; *from != '\0'; ++to, ++from) {
+		if (from[0] == '%' && isxdigit(from[1]) && isxdigit(from[2])) {
+			*to = hexToDec(from[1]) * 16 + hexToDec(from[2]);
+			from += 2;
+		}
+		else {
+			*to = *from;
+		}
+	}
+	while (*to != '\0') {
+		*to = 0;
+		++to;
+	}
+
+}
+
 
 int parseRequestLine(const char* line, int fd) {
 	char method[12];
 	char path[1024];
 	sscanf(line, "%[^ ] %[^ ]", method, path);
+	decodeMsg(path, path);
+	
 	printf("method %s, path: %s\n", method, path);
 	if (strcasecmp(method, "get") != 0) {
 		return -1;
@@ -142,7 +193,7 @@ int parseRequestLine(const char* line, int fd) {
 		sendHeadMsg(fd, 200, "Ok", getFileType(".html"), -1);
 		sendDir(file, fd);
 	}
-	else {//·¢ËÍÎÄ¼þ¸ø¿Í»§¶Ë
+	else {//å‘é€æ–‡ä»¶ç»™å®¢æˆ·ç«¯
 		sendHeadMsg(fd, 200, "Ok",
 			getFileType("file"), st.st_size);
 		sendFile(file, fd);
@@ -152,6 +203,7 @@ int parseRequestLine(const char* line, int fd) {
 
 int sendFile(const char* fileName, int cfd) {
 	int fd = open(fileName, O_RDONLY);
+	printf("sendfile...\n");
 	assert(fd);  
 #if 1
 	while (1) {

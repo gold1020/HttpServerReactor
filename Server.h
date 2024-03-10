@@ -10,7 +10,11 @@ int init_listenSocket(unsigned short port);
 
 int epollRun(int lfd);
 
-int recvHttpRequest(int cfd, int epfd);
+void* acceptRequest(void* arg);
+
+void* recvHttpRequest(void* arg);
+
+void decodeMsg(char* to, char* from);
 
 int sendFile(const char* fileName, int cfd);
 
