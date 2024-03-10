@@ -5,8 +5,13 @@
 #include <strings.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <stdlib.h>
 #include <assert.h>
 #include <sys/sendfile.h>
+
+int compare(const struct dirent** a, const struct dirent** b) {
+	return strcoll((*a)->d_name, (*b)->d_name);
+}
 
 int init_listenSocket(unsigned short port) {
 	//创建
@@ -29,7 +34,9 @@ int init_listenSocket(unsigned short port) {
 	servaddr.sin_port = htons(port);
 	servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
 	//绑定
-	bind(lfd, (struct sockaddr*)&servaddr, sizeof(servaddr));
+	int res = bind(lfd, (struct sockaddr*)&servaddr, sizeof(servaddr));
+	if (res == -1)
+		perror("bind_error\n");
 
 	//监听
 	if (listen(lfd, 128) < 0) {
@@ -132,7 +139,8 @@ int parseRequestLine(const char* line, int fd) {
 	};
 
 	if (S_ISDIR(st.st_mode)) {
-
+		sendHeadMsg(fd, 200, "Ok", getFileType(".html"), -1);
+		sendDir(file, fd);
 	}
 	else {//发送文件给客户端
 		sendHeadMsg(fd, 200, "Ok",
@@ -145,7 +153,7 @@ int parseRequestLine(const char* line, int fd) {
 int sendFile(const char* fileName, int cfd) {
 	int fd = open(fileName, O_RDONLY);
 	assert(fd);  
-#if 0
+#if 1
 	while (1) {
 		char buf[1024];
 		int len = read(fd, buf, sizeof buf);
@@ -158,10 +166,54 @@ int sendFile(const char* fileName, int cfd) {
 		}
 	}
 #else
+	off_t offset = 0;
 	int size = lseek(fd, 0, SEEK_END);
-	sendfile(cfd, fd, NULL, size);
-	return 0;
+	while (offset < size) {
+		int ret = sendfile(cfd, fd, &offset, size);
+	}
 #endif
+	close(fd);
+	return 0;
+}
+
+int sendDir(const char* dirName, int cfd) {
+	char buf[4096] = { 0 };
+	sprintf(buf, "<html><head><title>%s</title></head><body><table>", dirName);
+
+	struct dirent** nameList;
+	int num = scandir(dirName, &nameList, NULL, compare);
+
+	for (int i = 0; i < num; i++) {
+
+		char* name = nameList[i]->d_name;
+		struct stat st;
+		char subPath[1024];
+		if (strcmp(dirName, "./") == 0) {
+			sprintf(subPath, "%s%s", dirName, name);
+		}
+		else
+			sprintf(subPath, "%s/%s", dirName, name);
+		stat(subPath, &st);
+		printf("current path:%s\n", subPath);
+		/*if (subPath[0] == '.' && subPath[1] == '/') {
+			memcpy(subPath, subPath, strlen(subPath) - 2);
+		}*/
+
+		if (S_ISDIR(st.st_mode)) {
+			sprintf(buf + strlen(buf), "<tr><td><a href=\"%s\">%s</a></td><td>%ld</td></tr>", 
+				subPath, name, st.st_size);
+		}
+		else {
+			sprintf(buf + strlen(buf), "<tr><td><a href=\"%s\">%s</a></td><td>%ld</td></tr>",
+				name, name, st.st_size);
+		}
+		send(cfd, buf, strlen(buf), 0);
+		memset(buf, 0, sizeof(buf));
+		free(nameList[i]);
+	}
+	sprintf(buf + strlen(buf), "</table></body></html>");
+	send(cfd, buf, strlen(buf), 0);
+	free(nameList);
 }
 
 int sendHeadMsg(int cfd, int status, const char* descr, 
@@ -181,6 +233,12 @@ const char* getFileType(const char* fileName) {
 		return "text/plain; charset=utf-8";
 	if (strcmp(dot, ".html") == 0 || strcmp(dot, ".htm") == 0) {
 		return "text/html; charset=utf-8";
+	}
+	if (strcmp(dot, ".jpg") == 0) {
+		return "image/jpeg";
+	}
+	if (strcmp(dot, ".txt") == 0) {
+		return "text/plain";
 	}
 	return "";
 }

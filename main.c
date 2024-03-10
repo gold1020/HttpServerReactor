@@ -10,7 +10,7 @@ int main(int argc, char* argv[]) {
 	}*/
 	unsigned short port = 2000;
 	//chdir(argv[2]);
-	chdir("/home/goldlin/os-lab");
+	chdir("/home/goldlin/");
 
 
 	int lfd = init_listenSocket(port);

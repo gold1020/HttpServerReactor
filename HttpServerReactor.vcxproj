@@ -81,7 +81,12 @@
     <ClCompile Include="Server.c" />
     <ClCompile Include="main.c" />
   </ItemGroup>
-  <ItemDefinitionGroup />
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <CLanguageStandard>c11</CLanguageStandard>
+      <CppLanguageStandard>c++11</CppLanguageStandard>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>
